@@ -1,0 +1,235 @@
+---
+title: "Coding Sample MWDO Application"
+author: "Helena"
+date: "2026-04-09"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Accessing Survey Data for POLTRACK
+
+This document explains and demonstrates a variety of approaches
+accessing the survey data for all waves of the POLTRACK project.
+Documentation for the database can be found
+[here](https://docs.google.com/document/d/1_pZkTmcTeoQhNqj_iO9wo1oK0_F_mRg2Qg7mTIKGyOI/edit#heading=h.8tvak299rjge "Survey Documentation"),
+along with keys for the meaning of nominal variables.
+
+### Connecting to database
+
+Packages and password installation instructions can be found
+[here](https://github.com/lisamerten/poltrack#readme "Cornelius Poltrack Markdown")
+
+```{r}
+library(DBI)
+library(tidyverse)
+
+con_survey <- dbConnect(RMySQL::MySQL(), 
+                        dbname = "####".
+                        host = '####', 
+                        port = "####", 
+                        user = '####',
+                        password = Sys.getenv("password"))
+dbListTables(con_survey)
+```
+
+Be sure to disconnect from the server when you are done.
+
+```{r}
+dbDisconnect(con_survey) 
+```
+
+### Query Options
+
+The following are examples of how to query the data set for various
+combinations of variables and waves. These are the direct SQL queries
+needed to extract the data as a wide format table. There is also a query
+generator, if you would like to avoid the SQL available here --\>
+[Multiple Waves - Query Generator](#multiple-waves---query-generator).
+
+#### One Wave
+
+For selecting one variable in the output structure ID/Question (wide
+format table) , using the variable partyid for demonstration purposes.
+The code here also uses wave 1, to extract from any other specific wave
+this should be adjusted directly.
+
+1.  One variable
+
+    ```{r}
+    dbGetQuery(con_survey, "SELECT p_0002, 
+          MAX(CASE WHEN Question = 'partyid' THEN Answer END) AS partyid
+          FROM surveys_pooled
+          WHERE Wave = 1
+          GROUP BY p_0002")
+    ```
+
+2.  Multiple variables
+
+    Using partyid and edu as an example. Two variations are shown for
+    querying multiple variables:
+
+    ```{r}
+    dbGetQuery(con_survey, "SELECT p_0002, 
+          MAX(CASE WHEN Question = 'affective_groups_1' THEN Answer END) AS affective_groups_1,
+          MAX(CASE WHEN Question = 'edu' THEN Answer END) AS edu,
+          MAX(CASE WHEN Question = 'age' THEN Answer END) AS age
+          FROM surveys_pooled
+          WHERE Wave = 1
+          GROUP BY p_0002")
+    ```
+
+3.  All Variables
+
+    ```{r}
+    all_variables <- dbGetQuery(con_survey, "SELECT DISTINCT Question FROM surveys_pooled")
+
+    # Create the SQL query dynamically to retrieve the maximum value for all variables
+    query <- paste(
+      "SELECT p_0002,", 
+      paste(
+        sapply(all_variables$Question, function(var) {
+          paste(
+            "MAX(CASE WHEN Question = '", var, "' THEN Answer END) AS ", var, sep = ""
+          )
+        }),
+        collapse = ", "
+      ),
+      "FROM surveys_pooled WHERE Wave = 1 GROUP BY p_0002",
+      sep = " "
+    )
+
+    # Execute the query
+    result <- dbGetQuery(con_survey, query)
+    ```
+
+#### Multiple Waves - Query Generator {#multiple-waves---query-generator}
+
+The query generator is a function which aromatically queries and
+re-formats the data from any specified combination of questions and
+waves. The result is a wide format table. [Function
+Code](https://github.com/lisamerten/poltrack/blob/main/preprocessing/SQL_query_function.R)
+
+```{r}
+ 
+source(#YOUR PATH#)
+
+output <- SQL_query_function(variables, waves, homogenize)
+```
+
+-   Variables \<- list of variables
+
+-   Waves \<- list of wave numbers
+
+-   Homogenize \<- a command of "YES" or "NO" which determines whether
+    variables that are not repeatedly collected for individual
+    participants are combined into one column. Advantage is all are
+    neatly in one column, disadvantage being that their collection wave
+    for that participant is lost.
+
+Example:
+
+```{r}
+
+## Specify the variables
+variables_to_query <- c('sonntagsfrage', 'age', 'edu')
+
+## Specify Waves
+waves <- c(1, 2)
+
+## Apply function
+output <- SQL_query_function(variables_to_query, waves, "YES")
+```
+
+### Notes
+
+Issue with format / values of survey variables such as edu
+
+-   The variable "edu" is a factor variable when read from the db, which
+    should be transformed once to numeric and then back to factor before
+    recoding.
+-   This is because in the original form of the variable there are
+    several values for the same value (e.g. 8 and 8.0), which can lead
+    to values being forgotten when recoding. The problem is solved by
+    converting to numeric and back to factor.
+
+#### Additonal information Multiple Waves - Query Generator Code
+
+```{r}
+
+SQL_query_function <- function(variables, waves, homogenize = "YES") {
+  
+  single_wave_vars <- c(
+    "einwilligung", "polinterest", "newsinterest", "partyid", "leftright",
+    "partyid_icons_text", "party_importance", "party_pronouns",
+    "bundesland", "edu", "nationality", "inctotal",
+    "age", "gender", "ard_aspration", "zdf_aspration",
+    "bild_aspration", "sz_aspration", "faz_aspration", "spiegel_aspration",
+    "stern_aspration", "zeit_aspration", "focus_aspration", "welt_aspration",
+    "ntv_aspration", "taz_aspration", "dritten_aspration"
+  )
+  
+  # Initialize empty result
+  result <- NULL
+  
+  # Loop through waves
+  for (wave in waves) {
+    query <- paste0(
+      "SELECT id_survey, ",
+      paste(
+        sapply(variables, function(var) {
+          paste0("MAX(CASE WHEN Question = '", var, "' THEN Answer END) AS ", var)
+        }),
+        collapse = ", "
+      ),
+      " FROM surveys_pooled WHERE Wave = ", wave, " GROUP BY id_survey"
+    )
+    
+    wave_data <- dbGetQuery(con_survey, query)
+    
+    # Add wave suffix if more than one wave
+    if (length(waves) > 1) {
+      colnames(wave_data)[-which(colnames(wave_data) == "id_survey")] <-
+        paste0(colnames(wave_data)[-which(colnames(wave_data) == "id_survey")], "_W", wave)
+    }
+    
+    # Merge with previous results
+    if (is.null(result)) {
+      result <- wave_data
+    } else {
+      result <- merge(result, wave_data, by = "id_survey", all = TRUE)
+    }
+  }
+  
+  # Homogenize if requested
+  if (homogenize == "YES") {
+    
+    for (var in single_wave_vars) {
+      # Find columns for this variable across waves
+      matching_cols <- grep(paste0("^", var, "_W[0-9]+$"), names(result), value = TRUE)
+      
+      if (length(matching_cols) > 0) {
+        # Replace invalid codes with NA
+        result[matching_cols] <- lapply(result[matching_cols], function(col) {
+          ifelse(col %in% c(-77, -66, -99, "-77", "-66", "-99", "-77.0", "-66.0", "-99.0"), NA, col)
+        })
+        
+        # Coalesce into a single column
+        result[[var]] <- do.call(dplyr::coalesce, result[matching_cols])
+        
+        # Remove original wave columns
+        result <- result[, !(names(result) %in% matching_cols)]
+      }
+    }
+  }
+  
+  return(result)
+}
+```
